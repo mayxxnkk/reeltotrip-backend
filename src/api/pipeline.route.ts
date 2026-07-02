@@ -7,6 +7,19 @@ import {
 
 const router = Router();
 
+// In-memory job store for async pipeline results
+interface Job {
+  status: "pending" | "done" | "error";
+  result?: { conversationId: string; summary: string; history: string };
+  error?: string;
+}
+const jobs = new Map<string, Job>();
+
+function generateJobId(): string {
+  return Math.random().toString(36).slice(2) + Date.now().toString(36);
+}
+
+// POST /pipeline — starts job, returns jobId immediately
 router.post("/", async (req: Request, res: Response) => {
   const reelUrl = req.body?.reelUrl;
   const currency: string =
@@ -21,32 +34,58 @@ router.post("/", async (req: Request, res: Response) => {
     return;
   }
 
-  try {
-    const result = await runPipeline(reelUrl.trim(), currency, undefined, destinationOverride);
+  const jobId = generateJobId();
+  jobs.set(jobId, { status: "pending" });
 
-    const initialUserMessage = `New reel: ${reelUrl.trim()}`;
-    const initialAgentMessage = result.summary;
-    const state = createConversation(
-      reelUrl.trim(),
-      currency,
-      initialUserMessage,
-      initialAgentMessage,
-      result.reelInterpretation.destination  // save destination for re-plans
-    );
+  // Run pipeline in background — don't await
+  (async () => {
+    try {
+      const result = await runPipeline(reelUrl.trim(), currency, undefined, destinationOverride);
+      const state = createConversation(
+        reelUrl.trim(),
+        currency,
+        `New reel: ${reelUrl.trim()}`,
+        result.summary,
+        result.reelInterpretation.destination
+      );
+      jobs.set(jobId, {
+        status: "done",
+        result: {
+          conversationId: state.id,
+          summary: result.summary,
+          history: buildHistoryText(state),
+        },
+      });
+    } catch (e) {
+      jobs.set(jobId, {
+        status: "error",
+        error: e instanceof Error ? e.message : "Pipeline failed",
+      });
+    }
+  })();
 
-    const historyText = buildHistoryText(state);
+  // Return jobId immediately so frontend can poll
+  res.json({ jobId, status: "pending" });
+});
 
-    res.json({
-      conversationId: state.id,
-      summary: result.summary,
-      history: historyText,
-    });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({
-      error: e instanceof Error ? e.message : "Pipeline failed",
-    });
+// GET /pipeline/status/:jobId — poll for result
+router.get("/status/:jobId", (req: Request, res: Response) => {
+  const job = jobs.get(req.params.jobId);
+  if (!job) {
+    res.status(404).json({ error: "Job not found" });
+    return;
   }
+  if (job.status === "pending") {
+    res.json({ status: "pending" });
+    return;
+  }
+  if (job.status === "error") {
+    res.status(500).json({ status: "error", error: job.error });
+    return;
+  }
+  // Done — return result and clean up
+  jobs.delete(req.params.jobId);
+  res.json({ status: "done", ...job.result });
 });
 
 export default router;
