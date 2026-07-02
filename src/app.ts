@@ -11,7 +11,12 @@ import clarifyRoute from "./api/clarify.route";
 
 const app = express();
 
-app.use(cors({ origin: "http://localhost:3001" }));
+app.use(cors({
+  origin: [
+    "http://localhost:3001",
+    "https://reeltotrip-frontend.vercel.app",
+  ]
+}));
 app.use(express.json());
 app.use("/health", healthRoute);
 app.use("/interpret", interpretRoute);
